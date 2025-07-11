@@ -1,0 +1,134 @@
+# app.py (Simplified)
+
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+import sqlite3
+import os
+import hashlib
+
+app = Flask(_name_)
+app.secret_key = os.urandom(24) # Insecure for real app, just for example
+
+DATABASE = 'database.db'
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Initialize DB on app startup
+with app.app_context():
+    init_db()
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password'] # Storing plaintext or weak hash for example
+        if not username or not password:
+            flash('Username and password are required!')
+            return redirect(url_for('register'))
+
+        conn = get_db_connection()
+        try:
+            # Vulnerability: Storing password without proper hashing (e.g., bcrypt)
+            conn.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+            conn.commit()
+            flash('Registration successful! Please log in.')
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash('Username already exists.')
+        finally:
+            conn.close()
+    return render_template('register.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        conn = get_db_connection()
+        # Vulnerability: Potential SQL Injection if username/password are not properly sanitized
+        # or if using string formatting instead of parameterized queries.
+        # This example uses parameterized query, but common mistake.
+        user = conn.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password)).fetchone()
+        conn.close()
+
+        if user:
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            flash('Logged in successfully!')
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid username or password.')
+    return render_template('login.html')
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        flash('Please log in to view the dashboard.')
+        return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    # Vulnerability: Potential for Insecure Direct Object Reference (IDOR) if note_id isn't checked against user_id
+    # Also, if we were filtering notes by something user-controlled here without proper validation.
+    notes = conn.execute("SELECT * FROM notes WHERE user_id = ?", (session['user_id'],)).fetchall()
+    conn.close()
+    return render_template('dashboard.html', notes=notes)
+
+@app.route('/create_note', methods=['GET', 'POST'])
+def create_note():
+    if 'user_id' not in session:
+        flash('Please log in to create a note.')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        title = request.form['title']
+        content = request.form['content']
+
+        if not title or not content:
+            flash('Title and content are required!')
+            return redirect(url_for('create_note'))
+
+        conn = get_db_connection()
+        conn.execute("INSERT INTO notes (user_id, title, content) VALUES (?, ?, ?)",
+                     (session['user_id'], title, content))
+        conn.commit()
+        conn.close()
+        flash('Note created successfully!')
+        return redirect(url_for('dashboard'))
+    return render_template('create_note.html')
+
+@app.route('/view_note/<int:note_id>')
+def view_note(note_id):
+    if 'user_id' not in session:
+        flash('Please log in to view notes.')
+        return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    # Vulnerability: Insecure Direct Object Reference (IDOR) - does not check if note belongs to the user
+    note = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+    conn.close()
+
+    if not note:
